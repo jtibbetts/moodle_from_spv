@@ -343,18 +343,7 @@ function lti_build_request($instance, $typeconfig, $course, $typeid = null, $isl
 
     $role = lti_get_ims_role($USER, $instance->cmid, $instance->course, $islti2);
 
-    $intro = '';
-    if (!empty($instance->cmid)) {
-        $intro = format_module_intro('lti', $instance, $instance->cmid);
-        $intro = html_to_text($intro, 0, false);
-
-        // This may look weird, but this is required for new lines
-        // so we generate the same OAuth signature as the tool provider.
-        $intro = str_replace("\n", "\r\n", $intro);
-    }
     $requestparams = array(
-        'resource_link_title' => $instance->name,
-        'resource_link_description' => $intro,
         'user_id' => $USER->id,
         'lis_person_sourcedid' => $USER->idnumber,
         'roles' => $role,
@@ -362,17 +351,38 @@ function lti_build_request($instance, $typeconfig, $course, $typeid = null, $isl
         'context_label' => $course->shortname,
         'context_title' => $course->fullname,
     );
+    if (!empty($instance->name)) {
+        $requestparams['resource_link_title'] = $instance->name;
+    }
+    if (!empty($instance->cmid)) {
+        $intro = format_module_intro('lti', $instance, $instance->cmid);
+        $intro = html_to_text($intro, 0, false);
+
+        // This may look weird, but this is required for new lines
+        // so we generate the same OAuth signature as the tool provider.
+        $intro = str_replace("\n", "\r\n", $intro);
+        $requestparams['resource_link_description'] = $intro;
+    }
+    if (!empty($instance->servicesalt)) {
+        $placementsecret = $instance->servicesalt;
+        if ( isset($placementsecret) && ($islti2 ||
+             $typeconfig['acceptgrades'] == LTI_SETTING_ALWAYS ||
+             ($typeconfig['acceptgrades'] == LTI_SETTING_DELEGATE &&
+              $instance->instructorchoiceacceptgrades == LTI_SETTING_ALWAYS))) {
+
+            $sourcedid = json_encode(lti_build_sourcedid($instance->id, $USER->id, $placementsecret, $typeid));
+            $requestparams['lis_result_sourcedid'] = $sourcedid;
+    }
+    }
     if ($course->format == 'site') {
         $requestparams['context_type'] = 'Group';
     } else {
         $requestparams['context_type'] = 'CourseSection';
         $requestparams['lis_course_section_sourcedid'] = $course->idnumber;
     }
-    $placementsecret = $instance->servicesalt;
 
-    if ( isset($placementsecret) && ($islti2 ||
-         $typeconfig['acceptgrades'] == LTI_SETTING_ALWAYS ||
-         ($typeconfig['acceptgrades'] == LTI_SETTING_DELEGATE && $instance->instructorchoiceacceptgrades == LTI_SETTING_ALWAYS))) {
+    if ($islti2 || $typeconfig['acceptgrades'] == LTI_SETTING_ALWAYS ||
+         ($typeconfig['acceptgrades'] == LTI_SETTING_DELEGATE && $instance->instructorchoiceacceptgrades == LTI_SETTING_ALWAYS)) {
 
         $sourcedid = json_encode(lti_build_sourcedid($instance->id, $USER->id, $placementsecret, $typeid));
         $requestparams['lis_result_sourcedid'] = $sourcedid;
@@ -453,9 +463,11 @@ function lti_build_standard_request($instance, $orgid, $islti2) {
 
     $requestparams = array();
 
-    $requestparams['resource_link_id'] = $instance->id;
-    if (property_exists($instance, 'resource_link_id') and !empty($instance->resource_link_id)) {
-        $requestparams['resource_link_id'] = $instance->resource_link_id;
+    if ($instance) {
+        $requestparams['resource_link_id'] = $instance->id;
+        if (property_exists($instance, 'resource_link_id') and !empty($instance->resource_link_id)) {
+            $requestparams['resource_link_id'] = $instance->resource_link_id;
+        }
     }
 
     $requestparams['launch_presentation_locale'] = current_language();
@@ -520,10 +532,14 @@ function lti_build_custom_parameters($toolproxy, $tool, $instance, $params, $cus
             $tool->parameter, true), $custom);
         $settings = lti_get_tool_settings($tool->toolproxyid);
         $custom = array_merge($custom, lti_get_custom_parameters($toolproxy, $tool, $params, $settings));
-        $settings = lti_get_tool_settings($tool->toolproxyid, $instance->course);
-        $custom = array_merge($custom, lti_get_custom_parameters($toolproxy, $tool, $params, $settings));
-        $settings = lti_get_tool_settings($tool->toolproxyid, $instance->course, $instance->id);
-        $custom = array_merge($custom, lti_get_custom_parameters($toolproxy, $tool, $params, $settings));
+        if (!empty($instance->course)) {
+            $settings = lti_get_tool_settings($tool->toolproxyid, $instance->course);
+            $custom = array_merge($custom, lti_get_custom_parameters($toolproxy, $tool, $params, $settings));
+            if (!empty($instance->id)) {
+                $settings = lti_get_tool_settings($tool->toolproxyid, $instance->course, $instance->id);
+                $custom = array_merge($custom, lti_get_custom_parameters($toolproxy, $tool, $params, $settings));
+            }
+        }
     }
 
     return $custom;
@@ -1353,6 +1369,10 @@ function lti_get_type_type_config($id) {
         $type->lti_coursevisible = $config['coursevisible'];
     }
 
+    if (isset($config['contentitem'])) {
+        $type->lti_contentitem = $config['contentitem'];
+    }
+
     if (isset($config['debuglaunch'])) {
         $type->lti_debuglaunch = $config['debuglaunch'];
     }
@@ -1382,6 +1402,10 @@ function lti_prepare_type_for_save($type, $config) {
         $type->secureicon = $config->lti_secureicon;
     }
 
+    if (isset($config->lti_contentitem)) {
+        $type->contentitem = !empty($config->lti_contentitem) ? $config->lti_contentitem : 0;
+        $config->lti_contentitem = $type->contentitem;
+    }
     if (isset($config->lti_forcessl)) {
         $type->forcessl = !empty($config->lti_forcessl) ? $config->lti_forcessl : 0;
         $config->lti_forcessl = $type->forcessl;
@@ -1950,6 +1974,7 @@ function lti_get_capabilities() {
 
     $capabilities = array(
        'basic-lti-launch-request' => '',
+       'ContentItemSelectionRequest' => '',
        'Context.id' => 'context_id',
        'CourseSection.title' => 'context_title',
        'CourseSection.label' => 'context_label',
